@@ -583,6 +583,143 @@ open class ScreenshotRule<T : Activity> @JvmOverloads constructor(
         }
     }
 
+    fun assertSame(currentBitmap: Bitmap) {
+        assertSameInvoked = true
+
+        beforeAssertSame()
+
+        if (!launchActivity) {
+            launchActivity(activityIntent)
+        }
+
+        try {
+            try {
+                reporter?.captureOutput(this)
+                outputFileName = DeviceIdentifier.formatDeviceString(
+                    DeviceIdentifier.DeviceStringFormatter(
+                        testContext,
+                        testNameComponents
+                    ), DEFAULT_NAME_FORMAT
+                )
+
+                if (isRunningOnUiThread()) {
+                    throw NoScreenshotsOnUiThreadException()
+                }
+
+                if (orientationHelper.shouldIgnoreOrientation(orientationToIgnore)) {
+                    val orientationName =
+                        if (orientationToIgnore == SCREEN_ORIENTATION_PORTRAIT) "Portrait" else "Landscape"
+                    instrumentationPrintln(
+                        "\n\t✓ " + 27.toChar() + "[33mIgnoring baseline for " + testName +
+                            " due to $orientationName orientation" + 27.toChar() + "[0m"
+                    )
+                    assertFalse(
+                        "Output file should not exist for $orientationName orientation",
+                        outputFileExists
+                    )
+                    return
+                }
+
+                beforeInitializeView(activity)
+                initializeView(activity)
+                afterInitializeView(activity)
+
+                if (espressoActions != null) {
+                    espressoActions!!.invoke()
+                }
+
+                Espresso.onIdle()
+
+                if (hideSoftKeyboard) {
+                    Espresso.closeSoftKeyboard()
+                }
+
+                orientationHelper.assertOrientation()
+
+                var screenshotView: View? = null
+                if (screenshotViewProvider != null) {
+                    screenshotView = screenshotViewProvider!!.invoke(getRootView(activity))
+                }
+
+                exclusionRectProvider?.let { provider ->
+                    provider(getRootView(activity), exclusionRects)
+                }
+
+                beforeScreenshot(activity)
+
+                assertNotNull("Failed to capture bitmap from activity", currentBitmap)
+
+                afterScreenshot(activity, currentBitmap)
+
+                if (isLayoutInspectionModeEnabled) {
+                    Thread.sleep(LAYOUT_INSPECTION_TIME_MS.toLong())
+                }
+
+                val baselineBitmap = screenshotUtility.loadBaselineBitmapForComparison(testContext, testName)
+                    ?: if (isRecordMode()) {
+                        instrumentationPrintln(
+                            "\n\t✓ " + 27.toChar() + "[36mRecording baseline for " + testName +
+                                27.toChar() + "[0m"
+                        )
+                        return
+                    } else {
+                        throw ScreenshotBaselineNotDefinedException(
+                            moduleName = getModuleName(),
+                            testName = testName,
+                            testClass = fullyQualifiedTestPath,
+                            deviceKey = DeviceIdentifier.formatDeviceString(
+                                DeviceIdentifier.DeviceStringFormatter(
+                                    testContext,
+                                    null
+                                ), DeviceIdentifier.DEFAULT_FOLDER_FORMAT
+                            )
+                        )
+                    }
+
+                val bitmapCompare: BitmapCompare = when {
+                    exclusionRects.isNotEmpty() || exactness != null -> {
+                        FuzzyCompare(exactness, exclusionRects)::compareBitmaps
+                    }
+                    else -> SameAsCompare()::compareBitmaps
+                }
+
+                if (bitmapCompare(baselineBitmap, currentBitmap)) {
+                    assertTrue(
+                        "Could not delete cached bitmap $testName",
+                        screenshotUtility.deleteBitmap(activity, outputFileName)
+                    )
+                } else {
+                    if (TestifyFeatures.GenerateDiffs.isEnabled(activity)) {
+                        HighContrastDiff(exclusionRects)
+                            .name(outputFileName)
+                            .baseline(baselineBitmap)
+                            .current(currentBitmap)
+                            .exactness(exactness)
+                            .generate(context = activity)
+                    }
+                    if (isRecordMode()) {
+                        instrumentationPrintln(
+                            "\n\t✓ " + 27.toChar() + "[36mRecording baseline for " + testName +
+                                27.toChar() + "[0m"
+                        )
+                    } else {
+                        throw ScreenshotIsDifferentException(getModuleName(), fullyQualifiedTestPath)
+                    }
+                }
+            } finally {
+            }
+        } finally {
+            exclusionRects.clear()
+            ResourceWrapper.afterTestFinished(activity)
+            orientationHelper.afterTestFinished()
+            TestifyFeatures.reset()
+            if (throwable != null) {
+                //noinspection ThrowFromfinallyBlock
+                throw RuntimeException(throwable)
+            }
+        }
+    }
+
     @CallSuper
     open fun applyViewModifications(parentView: ViewGroup) {
         hideScrollbarsViewModification.modify(parentView)
